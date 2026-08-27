@@ -4,28 +4,65 @@ services:
 
   postgres:
     image: postgres:16
-
     container_name: rca-postgres
-
     restart: unless-stopped
-
     environment:
-      POSTGRES_USER: rca
-      POSTGRES_PASSWORD: rca1234
-      POSTGRES_DB: rcadb
-
+      POSTGRES_USER: ${POSTGRES_USER:-rca}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-rcadb}
     ports:
       - "5432:5432"
-
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rca -d rcadb"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rca} -d ${POSTGRES_DB:-rcadb}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # one-shot: applies alembic migrations, then exits. api/worker wait for
+  # this to finish successfully before starting, so migrations never race
+  # against two containers trying to run them at once.
+  migrate:
+    build: .
+    container_name: rca-migrate
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build: .
+    container_name: rca-api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    container_name: rca-worker
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
-
